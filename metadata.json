@@ -1,0 +1,6 @@
+{
+  "name": "DUKAN AI - Smart Shopkeeper Assistant",
+  "description": "Smart retail POS & dukaan inventory assistant powered by Gemini AI, featuring voice commands, real-time inventory updates, sales analytics, and low-stock alerts.",
+  "requestFramePermissions": ["camera", "microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

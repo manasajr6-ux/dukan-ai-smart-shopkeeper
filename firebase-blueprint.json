@@ -1,0 +1,73 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Shopkeeper profile and store settings",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "shopName": { "type": "string", "maxLength": 100 },
+        "ownerName": { "type": "string", "maxLength": 100 },
+        "phone": { "type": "string", "maxLength": 20 },
+        "currency": { "type": "string", "maxLength": 10 },
+        "lowStockThresholdDefault": { "type": "number" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["userId", "shopName", "ownerName"]
+    },
+    "Product": {
+      "title": "Product",
+      "description": "Inventory product item details",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "name": { "type": "string", "maxLength": 150 },
+        "category": { "type": "string", "maxLength": 50 },
+        "barcode": { "type": "string", "maxLength": 50 },
+        "costPrice": { "type": "number" },
+        "sellingPrice": { "type": "number" },
+        "stockQuantity": { "type": "number" },
+        "minStockThreshold": { "type": "number" },
+        "unit": { "type": "string", "maxLength": 20 },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["userId", "name", "category", "costPrice", "sellingPrice", "stockQuantity", "minStockThreshold", "unit"]
+    },
+    "Sale": {
+      "title": "Sale",
+      "description": "Recorded customer sales transaction",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "billNumber": { "type": "string", "maxLength": 50 },
+        "customerName": { "type": "string", "maxLength": 100 },
+        "customerPhone": { "type": "string", "maxLength": 20 },
+        "items": { "type": "array" },
+        "subtotal": { "type": "number" },
+        "discount": { "type": "number" },
+        "totalAmount": { "type": "number" },
+        "totalProfit": { "type": "number" },
+        "paymentMode": { "type": "string", "maxLength": 30 },
+        "paymentStatus": { "type": "string", "maxLength": 30 },
+        "notes": { "type": "string", "maxLength": 300 },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["userId", "billNumber", "items", "totalAmount", "paymentMode", "paymentStatus", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "UserProfile",
+      "description": "User profile and store settings"
+    },
+    "/products/{productId}": {
+      "schema": "Product",
+      "description": "Shop products and stock quantities"
+    },
+    "/sales/{saleId}": {
+      "schema": "Sale",
+      "description": "Sales records and customer bills"
+    }
+  }
+}
