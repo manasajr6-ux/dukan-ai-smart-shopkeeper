@@ -23,6 +23,20 @@ export interface Product {
   updatedAt: string;
 }
 
+export interface RestockRecommendation {
+  productId: string;
+  productName: string;
+  category: string;
+  currentStock: number;
+  minThreshold: number;
+  unit: string;
+  status: 'out_of_stock' | 'low_stock';
+  suggestedReorderQuantity: number;
+  salesVelocityReason: string;
+  recentSalesCount: number;
+  averageDailySales: number;
+}
+
 export interface SaleItem {
   productId: string;
   productName: string;

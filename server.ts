@@ -3,7 +3,7 @@ import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI, Type, ThinkingLevel } from '@google/genai';
 
 process.env.VITE_CONFIG_NATIVE_IGNORE_WARNING = 'true';
 dotenv.config();
@@ -118,41 +118,140 @@ function parseCommandRuleBased(command: string, inventory: any[], shopName: stri
     };
   }
 
-  // 2. Check for low stock query
-  if (lower.includes('low stock') || lower.includes('kam stock') || lower.includes('khatam') || lower.includes('out of stock')) {
-    const lowItems = inventory.filter((i) => i.stockQuantity <= (i.minStockThreshold || 5));
-    const names = lowItems.map((i) => `${i.name} (${i.stockQuantity} left)`).join(', ');
+  // 2. Check for low stock or restock query (e.g. "Show me products that need restocking", "low stock items", "khatam ho gaya")
+  if (
+    lower.includes('low stock') ||
+    lower.includes('kam stock') ||
+    lower.includes('khatam') ||
+    lower.includes('out of stock') ||
+    lower.includes('restock') ||
+    lower.includes('restocking') ||
+    lower.includes('need restocking') ||
+    lower.includes('needs restocking') ||
+    lower.includes('reorder')
+  ) {
+    const criticalItems = inventory.filter((i) => i.stockQuantity <= (i.minStockThreshold || 5));
+    const summaryItems = criticalItems.map((i) => {
+      const isOut = i.stockQuantity <= 0;
+      const statusLabel = isOut ? 'OUT OF STOCK' : 'LOW STOCK';
+      const suggestedReorder = Math.max(i.minStockThreshold * 2 - i.stockQuantity, i.minStockThreshold || 5, 10);
+      return {
+        ...i,
+        statusLabel,
+        suggestedReorder,
+      };
+    });
+
+    const spokenNames = summaryItems
+      .slice(0, 4)
+      .map((i) => `${i.name} (${i.stockQuantity} ${i.unit || 'unit'} left, suggest reorder +${i.suggestedReorder})`)
+      .join('; ');
+
     return {
       intent: 'QUERY_INFO',
       confidence: 0.95,
-      speechResponse: lowItems.length > 0
-        ? `You have ${lowItems.length} items running low: ${names}. Check Inventory tab to restock.`
-        : 'All items currently have healthy stock levels above minimum thresholds!',
-      queryAnswer: lowItems.length > 0
-        ? `Items requiring restock:\n${lowItems.map((i) => `• ${i.name}: ${i.stockQuantity} ${i.unit} remaining (Threshold: ${i.minStockThreshold})`).join('\n')}`
-        : 'No low stock items currently.',
+      speechResponse: summaryItems.length > 0
+        ? `You have ${summaryItems.length} products that need restocking: ${spokenNames}. You can restock directly from your dashboard.`
+        : 'All inventory is currently healthy with stock levels above minimum thresholds!',
+      queryAnswer: summaryItems.length > 0
+        ? `Products Requiring Restock (${summaryItems.length} items):\n` +
+          summaryItems
+            .map(
+              (i) =>
+                `• [${i.statusLabel}] ${i.name}: Available ${i.stockQuantity} ${i.unit || 'pcs'} (Min Threshold: ${i.minStockThreshold}) → Suggested Reorder: +${i.suggestedReorder} ${i.unit || 'pcs'}`
+            )
+            .join('\n')
+        : 'All products currently have healthy inventory levels above minimum thresholds.',
     };
   }
 
-  // 3. Check for add product
-  if (lower.startsWith('add') || lower.includes('naya item') || lower.includes('nayi item')) {
-    const priceMatch = command.match(/(?:at|for|selling|price|rs|₹)\s*(\d+)/i);
-    const sellingPrice = priceMatch ? parseFloat(priceMatch[1]) : 50;
-    const nameMatch = command.replace(/^(add|naya item|nayi item)\s+/i, '').replace(/(at|for|selling|price|rs|₹).*$/i, '').trim();
-    const name = nameMatch || 'New Product';
+  // 3. Check for add product (e.g. "Add 2 kg Tata Salt to my inventory", "Add 50 kg basmati rice at 90 rupees")
+  if (lower.startsWith('add') || lower.includes('naya item') || lower.includes('nayi item') || lower.includes('add karo') || lower.includes('nayi entry')) {
+    // Extract price if specified with explicit word boundary
+    const priceMatch = command.match(/\b(?:at|for|selling\s+price|price|rate|cost|rs\.?|inr|₹)\s*(\d+(?:\.\d+)?)/i);
+    let sellingPrice = priceMatch ? parseFloat(priceMatch[1]) : 0;
+
+    // Extract quantity and unit: e.g. "2 kg", "25 packets", "10 pcs", "5 ltr"
+    let quantity = 1;
+    let unit = 'pcs';
+    const qtyUnitRegex = /\b(\d+(?:\.\d+)?)\s*(kg|g|gm|grams|pkt|packet|packets|pcs|piece|pieces|bottle|bottles|box|boxes|litre|litres|ltr|l|can|cans|pouch|pouches)\b/i;
+    const qtyUnitMatch = command.match(qtyUnitRegex);
+
+    if (qtyUnitMatch) {
+      quantity = parseFloat(qtyUnitMatch[1]);
+      const rawUnit = qtyUnitMatch[2].toLowerCase();
+      if (rawUnit === 'pkt' || rawUnit === 'packet' || rawUnit === 'packets') unit = 'pkt';
+      else if (rawUnit === 'kg') unit = 'kg';
+      else if (rawUnit === 'g' || rawUnit === 'gm' || rawUnit === 'grams') unit = 'g';
+      else if (rawUnit === 'litre' || rawUnit === 'litres' || rawUnit === 'ltr' || rawUnit === 'l') unit = 'ltr';
+      else if (rawUnit === 'bottle' || rawUnit === 'bottles') unit = 'bottle';
+      else if (rawUnit === 'box' || rawUnit === 'boxes') unit = 'box';
+      else unit = 'pcs';
+    } else {
+      // Look for plain number after 'add'
+      const plainNumMatch = command.match(/^(?:add|naya item|nayi item)\s+(\d+(?:\.\d+)?)\b/i);
+      if (plainNumMatch) {
+        quantity = parseFloat(plainNumMatch[1]);
+      }
+    }
+
+    // Clean name: remove "add", quantity+unit, "to my inventory", "to stock", price clauses
+    let cleanName = command
+      .replace(/^(?:add|naya item|nayi item|add karo)\s+/i, '')
+      .replace(qtyUnitRegex, '')
+      .replace(/\b(?:to\s+(?:my\s+)?(?:inventory|stock|dukan|store|catalog)|in\s+(?:my\s+)?(?:inventory|stock))\b/gi, '')
+      .replace(/\b(?:at|for|selling\s+price|price|rate|cost|rs\.?|inr|₹)\s*\d+(?:\.\d+)?(?:\s*(?:rupees|rs|per\s+\w+))?/gi, '')
+      .replace(/^\s*(?:of|a|an)\s+/i, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (!cleanName || cleanName.length < 2) {
+      cleanName = 'New Item';
+    }
+
+    // Estimate realistic default price if not provided
+    if (sellingPrice <= 0) {
+      const lowerClean = cleanName.toLowerCase();
+      if (lowerClean.includes('salt')) sellingPrice = 28;
+      else if (lowerClean.includes('rice')) sellingPrice = 75;
+      else if (lowerClean.includes('atta')) sellingPrice = 240;
+      else if (lowerClean.includes('sugar')) sellingPrice = 45;
+      else if (lowerClean.includes('oil')) sellingPrice = 160;
+      else if (lowerClean.includes('milk')) sellingPrice = 30;
+      else if (lowerClean.includes('soap')) sellingPrice = 35;
+      else sellingPrice = 50;
+    }
+
+    const costPrice = Math.max(1, Math.round(sellingPrice * 0.8));
+    
+    // Determine category
+    const lowerClean = cleanName.toLowerCase();
+    let category = 'Groceries';
+    if (lowerClean.includes('milk') || lowerClean.includes('curd') || lowerClean.includes('paneer') || lowerClean.includes('butter') || lowerClean.includes('cheese') || lowerClean.includes('ghee')) {
+      category = 'Dairy';
+    } else if (lowerClean.includes('atta') || lowerClean.includes('rice') || lowerClean.includes('dal') || lowerClean.includes('salt') || lowerClean.includes('sugar') || lowerClean.includes('oil')) {
+      category = 'Staples';
+    } else if (lowerClean.includes('biscuit') || lowerClean.includes('chips') || lowerClean.includes('namkeen') || lowerClean.includes('noodle') || lowerClean.includes('maggi')) {
+      category = 'Snacks';
+    } else if (lowerClean.includes('tea') || lowerClean.includes('coffee') || lowerClean.includes('juice')) {
+      category = 'Beverages';
+    } else if (lowerClean.includes('soap') || lowerClean.includes('shampoo') || lowerClean.includes('paste') || lowerClean.includes('detergent')) {
+      category = 'Personal Care';
+    }
 
     return {
       intent: 'ADD_PRODUCT',
-      confidence: 0.85,
-      speechResponse: `Added new product ${name} with selling price ${currency}${sellingPrice} to your catalog.`,
+      confidence: 0.92,
+      speechResponse: `Added ${cleanName} (${quantity} ${unit}) at ${currency}${sellingPrice} to your ${category} inventory.`,
       productData: {
-        name,
-        category: 'General',
-        costPrice: Math.round(sellingPrice * 0.8),
+        name: cleanName,
+        category,
+        costPrice,
         sellingPrice,
-        stockQuantity: 20,
-        minStockThreshold: 5,
-        unit: 'pcs',
+        stockQuantity: quantity,
+        minStockThreshold: Math.max(1, Math.min(5, Math.floor(quantity * 0.2) || 2)),
+        unit,
+        barcode: '',
       },
     };
   }
@@ -199,6 +298,7 @@ async function startServer() {
     }
 
     const apiKey = process.env.GEMINI_API_KEY;
+    console.log('Gemini API Key status in request:', apiKey ? `Present (length ${apiKey.length}, starts with ${apiKey.slice(0, 6)})` : 'NOT SET');
 
     // Fallback if no valid key
     if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
@@ -242,18 +342,26 @@ Analyze the shopkeeper's command and map it to one of these intents:
 2. "ADD_PRODUCT": The shopkeeper wants to add a new product to inventory. E.g.: "Add 50 kg basmati rice selling at 90 rupees cost 75", "Naya item add karo Parle-G 20 packets price 10".
 3. "UPDATE_PRODUCT": The shopkeeper wants to update stock or price of an existing product. E.g.: "Update sugar stock to 40", "Rice price changed to 95", "Add 10 more packets of maggi".
 4. "DELETE_PRODUCT": The shopkeeper wants to remove a product. E.g.: "Delete expired biscuit", "Remove item XYZ".
-5. "QUERY_INFO": The shopkeeper is asking a question about stock, sales, low stock, or shop performance. E.g.: "Which items are low stock?", "How much did we sell today?", "Do we have milk left?".
+5. "QUERY_INFO": The shopkeeper is asking a question about stock, sales, low stock, restocking, or shop performance. E.g.: "Show me products that need restocking", "Which items are low stock?", "How much did we sell today?", "Do we have milk left?".
 6. "CONVERSATIONAL": General greeting, thank you, or non-actionable chat.
 
 Rules:
+- If the user asks "Show me products that need restocking" or asks about low stock/out of stock items, set intent to "QUERY_INFO", check the inventoryContext for items where stockQuantity <= minStockThreshold, and provide clear details in speechResponse and queryAnswer with current stock vs minimum threshold and suggested reorder quantities.
 - If recording a sale, match each mentioned item to the closest product in the inventory.
+- If adding a product (e.g. "Add 2 kg Tata Salt to my inventory"):
+  - name: clean product name ONLY (e.g. "Tata Salt", NOT "2 kg Tata Salt to my inventory").
+  - stockQuantity: the exact quantity mentioned (e.g. 2). Default to 10 if not mentioned.
+  - unit: the unit mentioned (e.g. "kg", "pkt", "pcs", "litre", "bottle", "box"). Default to "pcs".
+  - sellingPrice: price mentioned or realistic retail price in India (e.g. 28 for Tata Salt).
+  - costPrice: cost price mentioned or ~80% of sellingPrice.
+  - category: appropriate retail category (e.g. "Staples", "Dairy", "Snacks", "Beverages", "Personal Care", "Groceries").
 - For sale paymentMode, default to "cash" if not specified. Allowed values: "cash", "upi", "credit_khata", "card".
 - For sale paymentStatus: if mode is "credit_khata" or user said "udhaar" / "khata" / "pay later", set "pending_credit", otherwise "paid".
 - In speechResponse, give a concise, respectful, shopkeeper-friendly confirmation in simple English or Hinglish that can be spoken via Text-To-Speech.
 `;
 
       const geminiCall = ai.models.generateContent({
-        model: 'gemini-3.8-flash',
+        model: 'gemini-3.1-flash-lite',
         contents: prompt,
         config: {
           responseMimeType: 'application/json',
@@ -262,7 +370,7 @@ Rules:
             properties: {
               intent: {
                 type: Type.STRING,
-                description: 'RECORD_SALE, ADD_PRODUCT, UPDATE_PRODUCT, DELETE_PRODUCT, QUERY_INFO, or CONVERSATIONAL',
+                description: 'Must be exactly one of: RECORD_SALE, ADD_PRODUCT, UPDATE_PRODUCT, DELETE_PRODUCT, QUERY_INFO, CONVERSATIONAL',
               },
               confidence: {
                 type: Type.NUMBER,
@@ -341,18 +449,44 @@ Rules:
         },
       });
 
-      // 6-second timeout before graceful fallback
+      // 10-second timeout before graceful fallback
       const timeout = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('Gemini API timeout')), 6000)
+        setTimeout(() => reject(new Error('Gemini API timeout')), 10000)
       );
 
       const response: any = await Promise.race([geminiCall, timeout]);
       const parsedData = JSON.parse(response.text || '{}');
 
+      // Normalize intent string
+      if (parsedData.intent) {
+        const upper = String(parsedData.intent).toUpperCase();
+        if (upper === 'ADD_INVENTORY' || upper === 'ADD_ITEM' || upper === 'NEW_PRODUCT') {
+          parsedData.intent = 'ADD_PRODUCT';
+        } else if (upper === 'SELL' || upper === 'NEW_SALE') {
+          parsedData.intent = 'RECORD_SALE';
+        } else {
+          parsedData.intent = upper;
+        }
+      }
+
+      // Ensure price defaults if needed
+      if (parsedData.intent === 'ADD_PRODUCT' && parsedData.productData) {
+        if (!parsedData.productData.sellingPrice || parsedData.productData.sellingPrice <= 0) {
+          const lowerName = (parsedData.productData.name || '').toLowerCase();
+          if (lowerName.includes('salt')) parsedData.productData.sellingPrice = 28;
+          else if (lowerName.includes('atta')) parsedData.productData.sellingPrice = 240;
+          else if (lowerName.includes('milk')) parsedData.productData.sellingPrice = 30;
+          else parsedData.productData.sellingPrice = 50;
+        }
+        if (!parsedData.productData.costPrice || parsedData.productData.costPrice <= 0) {
+          parsedData.productData.costPrice = Math.max(1, Math.round(parsedData.productData.sellingPrice * 0.8));
+        }
+      }
+
       res.json({
         success: true,
         data: parsedData,
-        mode: 'gemini_3.8_flash',
+        mode: 'gemini_3.1_flash_lite',
       });
     } catch (error: any) {
       console.warn('Gemini error/timeout, using smart fallback parser:', error.message);

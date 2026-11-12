@@ -22,7 +22,7 @@ import {
   OperationType,
   User,
 } from '../firebase/config';
-import { Product, Sale, SaleItem, UserProfile, AICommandResponse, PaymentMode } from '../types';
+import { Product, Sale, SaleItem, UserProfile, AICommandResponse, PaymentMode, RestockRecommendation } from '../types';
 import { INITIAL_PRODUCTS, INITIAL_DEMO_PRODUCTS, INITIAL_DEMO_SALES } from '../data/seedData';
 
 interface DukanContextType {
@@ -36,6 +36,10 @@ interface DukanContextType {
   sales: Sale[];
   lowStockProducts: Product[];
   outOfStockProducts: Product[];
+  restockRecommendations: RestockRecommendation[];
+  getRestockRecommendation: (product: Product) => RestockRecommendation;
+  updateMinStockThreshold: (id: string, newThreshold: number) => Promise<void>;
+  restockProduct: (id: string, quantityToAdd: number) => Promise<void>;
   loginWithGoogle: () => Promise<void>;
   loginAsDemo: () => Promise<void>;
   logout: () => Promise<void>;
@@ -348,6 +352,87 @@ export const DukanProvider: React.FC<{ children: ReactNode }> = ({ children }) =
     return products.filter((p) => p.stockQuantity <= 0);
   }, [products]);
 
+  // Calculate restock recommendation based on recent sales velocity
+  const calculateRestockRecommendation = (product: Product, allSales: Sale[]): RestockRecommendation => {
+    const isOutOfStock = product.stockQuantity <= 0;
+    const status: 'out_of_stock' | 'low_stock' = isOutOfStock ? 'out_of_stock' : 'low_stock';
+
+    let totalSold = 0;
+    let firstSaleTime = Date.now();
+    let hasSales = false;
+
+    allSales.forEach((s) => {
+      s.items?.forEach((it) => {
+        if (it.productId === product.id || it.productName.toLowerCase() === product.name.toLowerCase()) {
+          totalSold += Number(it.quantity) || 0;
+          hasSales = true;
+          const t = new Date(s.createdAt).getTime();
+          if (!isNaN(t) && t < firstSaleTime) firstSaleTime = t;
+        }
+      });
+    });
+
+    const now = Date.now();
+    const daysDiff = Math.max(1, Math.ceil((now - firstSaleTime) / (1000 * 60 * 60 * 24)));
+    const avgDaily = hasSales && totalSold > 0 ? totalSold / daysDiff : 0;
+
+    let suggestedQty = 0;
+    let reason = '';
+
+    if (hasSales && totalSold > 0) {
+      // 7-day safety buffer based on sales velocity
+      const targetBuffer = Math.ceil(avgDaily * 7);
+      const deficit = Math.max(0, product.minStockThreshold - product.stockQuantity);
+      suggestedQty = Math.max(targetBuffer + deficit, (product.minStockThreshold * 2) - product.stockQuantity, 5);
+      reason = `Based on sales velocity: ${totalSold} ${product.unit} sold (~${avgDaily.toFixed(1)}/day for 7-day cover)`;
+    } else {
+      // Standard recommended buffer: 2x minimum threshold minus current stock, minimum 5
+      suggestedQty = Math.max((product.minStockThreshold * 2) - product.stockQuantity, product.minStockThreshold || 5, 10);
+      reason = `Standard safety buffer (2x minimum threshold of ${product.minStockThreshold} ${product.unit})`;
+    }
+
+    return {
+      productId: product.id,
+      productName: product.name,
+      category: product.category,
+      currentStock: product.stockQuantity,
+      minThreshold: product.minStockThreshold,
+      unit: product.unit,
+      status,
+      suggestedReorderQuantity: Math.ceil(suggestedQty),
+      salesVelocityReason: reason,
+      recentSalesCount: totalSold,
+      averageDailySales: Number(avgDaily.toFixed(1)),
+    };
+  };
+
+  const getRestockRecommendation = (product: Product): RestockRecommendation => {
+    return calculateRestockRecommendation(product, sales);
+  };
+
+  const restockRecommendations = useMemo(() => {
+    const critical = products.filter((p) => p.stockQuantity <= p.minStockThreshold);
+    return critical.map((p) => calculateRestockRecommendation(p, sales));
+  }, [products, sales]);
+
+  const updateMinStockThreshold = async (id: string, newThreshold: number) => {
+    const parsed = Number(newThreshold);
+    if (isNaN(parsed) || parsed < 0) {
+      throw new Error('Minimum threshold must be a non-negative number');
+    }
+    await updateProduct(id, { minStockThreshold: parsed });
+  };
+
+  const restockProduct = async (id: string, quantityToAdd: number) => {
+    const parsedQty = Number(quantityToAdd);
+    if (isNaN(parsedQty) || parsedQty <= 0) {
+      throw new Error('Restock quantity must be greater than 0');
+    }
+    const target = products.find((p) => p.id === id);
+    if (!target) throw new Error('Product not found in inventory');
+    await updateProduct(id, { stockQuantity: target.stockQuantity + parsedQty });
+  };
+
   // Authentication Handlers
   const loginWithGoogle = async () => {
     setLoading(true);
@@ -470,9 +555,10 @@ export const DukanProvider: React.FC<{ children: ReactNode }> = ({ children }) =
       updatedAt: now,
     };
 
+    const updated = [newProduct, ...products];
+    setProducts(updated);
+
     if (isDemoMode || !isFirestoreConnected) {
-      const updated = [newProduct, ...products];
-      setProducts(updated);
       saveDemoState(updated, sales);
       return id;
     }
@@ -482,9 +568,7 @@ export const DukanProvider: React.FC<{ children: ReactNode }> = ({ children }) =
       await setDoc(docRef, { ...newProduct, id: docRef.id });
       return docRef.id;
     } catch (err) {
-      console.warn('Firestore write failed, saving locally:', err);
-      const updated = [newProduct, ...products];
-      setProducts(updated);
+      console.warn('Firestore write failed, saved locally:', err);
       saveDemoState(updated, sales);
       return id;
     }
@@ -736,16 +820,27 @@ export const DukanProvider: React.FC<{ children: ReactNode }> = ({ children }) =
         });
       }
     } else if (result.intent === 'ADD_PRODUCT' && result.productData) {
-      await addProduct({
-        name: result.productData.name,
-        category: result.productData.category || 'General',
-        costPrice: result.productData.costPrice || 0,
-        sellingPrice: result.productData.sellingPrice || 10,
-        stockQuantity: result.productData.stockQuantity || 10,
-        minStockThreshold: result.productData.minStockThreshold || 5,
-        unit: result.productData.unit || 'pcs',
-        barcode: result.productData.barcode || '',
-      });
+      const prodName = (result.productData.name || 'New Item').trim();
+      const lowerName = prodName.toLowerCase();
+      const existing = products.find((p) => p.name.toLowerCase() === lowerName);
+      if (existing) {
+        const addedQty = Number(result.productData.stockQuantity) || 1;
+        await updateProduct(existing.id, {
+          stockQuantity: existing.stockQuantity + addedQty,
+          sellingPrice: result.productData.sellingPrice || existing.sellingPrice,
+        });
+      } else {
+        await addProduct({
+          name: prodName,
+          category: result.productData.category || 'General',
+          costPrice: Number(result.productData.costPrice) || Math.max(1, Math.round((Number(result.productData.sellingPrice) || 30) * 0.8)),
+          sellingPrice: Number(result.productData.sellingPrice) || 30,
+          stockQuantity: Number(result.productData.stockQuantity) || 1,
+          minStockThreshold: Number(result.productData.minStockThreshold) || 2,
+          unit: result.productData.unit || 'pcs',
+          barcode: result.productData.barcode || '',
+        });
+      }
     } else if (result.intent === 'UPDATE_PRODUCT' && result.updateData) {
       let targetProd = products.find((p) => p.id === result.updateData?.matchedProductId);
       if (!targetProd && result.updateData.productName) {
@@ -798,6 +893,10 @@ export const DukanProvider: React.FC<{ children: ReactNode }> = ({ children }) =
         sales,
         lowStockProducts,
         outOfStockProducts,
+        restockRecommendations,
+        getRestockRecommendation,
+        updateMinStockThreshold,
+        restockProduct,
         loginWithGoogle,
         loginAsDemo,
         logout,

@@ -16,13 +16,22 @@ import {
   Banknote,
   QrCode,
   BookOpen,
+  Send,
+  ShieldCheck,
+  AlertOctagon,
+  Edit2,
+  Check,
+  CheckCircle2,
+  RotateCcw,
+  RefreshCw,
+  SlidersHorizontal,
 } from 'lucide-react';
 import { useDukan } from '../context/DukanContext';
 import { Sale } from '../types';
 
 interface DashboardViewProps {
   onNavigate: (tab: string) => void;
-  onOpenVoiceModal: (initialPrompt?: string) => void;
+  onOpenVoiceModal: (initialPrompt?: string, autoExecute?: boolean) => void;
   onOpenAddProductModal: () => void;
   onSelectSaleForReceipt: (sale: Sale) => void;
 }
@@ -33,10 +42,59 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   onOpenAddProductModal,
   onSelectSaleForReceipt,
 }) => {
-  const { profile, products, sales, lowStockProducts, outOfStockProducts, quickAdjustStock } = useDukan();
+  const {
+    profile,
+    products,
+    sales,
+    lowStockProducts,
+    outOfStockProducts,
+    restockRecommendations,
+    updateMinStockThreshold,
+    restockProduct,
+    quickAdjustStock,
+  } = useDukan();
   const [quickInput, setQuickInput] = useState('');
+  const [editingThresholdId, setEditingThresholdId] = useState<string | null>(null);
+  const [tempThresholdValue, setTempThresholdValue] = useState<number>(5);
+  const [filterAlertStatus, setFilterAlertStatus] = useState<'all' | 'out' | 'low'>('all');
+  const [restockingId, setRestockingId] = useState<string | null>(null);
+  const [notificationToast, setNotificationToast] = useState<string | null>(null);
 
   const currency = profile?.currency || '₹';
+
+  const handleQuickRestock = async (productId: string, qty: number, productName: string) => {
+    setRestockingId(productId);
+    try {
+      await restockProduct(productId, qty);
+      setNotificationToast(`Restocked +${qty} ${productName}. Stock restored successfully!`);
+      setTimeout(() => setNotificationToast(null), 3500);
+    } catch (e: any) {
+      alert(`Restock failed: ${e.message}`);
+    } finally {
+      setRestockingId(null);
+    }
+  };
+
+  const handleSaveThreshold = async (productId: string) => {
+    try {
+      await updateMinStockThreshold(productId, tempThresholdValue);
+      setEditingThresholdId(null);
+      setNotificationToast(`Updated minimum stock threshold to ${tempThresholdValue}!`);
+      setTimeout(() => setNotificationToast(null), 3500);
+    } catch (e: any) {
+      alert(`Threshold update failed: ${e.message}`);
+    }
+  };
+
+  const displayedAlerts = useMemo(() => {
+    if (filterAlertStatus === 'out') {
+      return restockRecommendations.filter((r) => r.status === 'out_of_stock');
+    }
+    if (filterAlertStatus === 'low') {
+      return restockRecommendations.filter((r) => r.status === 'low_stock');
+    }
+    return restockRecommendations;
+  }, [restockRecommendations, filterAlertStatus]);
 
   // Compute Today's Stats
   const todayMetrics = useMemo(() => {
@@ -80,7 +138,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const handleQuickSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (quickInput.trim()) {
-      onOpenVoiceModal(quickInput.trim());
+      onOpenVoiceModal(quickInput.trim(), true);
       setQuickInput('');
     }
   };
@@ -114,24 +172,33 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             </p>
           </div>
 
-          {/* Quick Voice / Text Bar */}
-          <div className="w-full md:w-auto md:min-w-[380px]">
+          {/* Quick Voice / Text Bar with functional Send & Mic buttons */}
+          <div className="w-full md:w-auto md:min-w-[420px]">
             <form onSubmit={handleQuickSubmit} className="relative flex items-center">
               <input
                 type="text"
                 value={quickInput}
                 onChange={(e) => setQuickInput(e.target.value)}
-                placeholder='E.g. "Sold 2 milk cash" or "Atta 5kg"...'
-                className="w-full pl-4 pr-24 py-3 rounded-xl bg-slate-900/90 border border-slate-700 text-white placeholder-slate-400 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 shadow-inner"
+                placeholder='E.g. "Add 2 kg Tata Salt to my inventory"...'
+                className="w-full pl-4 pr-32 py-3 rounded-xl bg-slate-900/90 border border-slate-700 text-white placeholder-slate-400 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500 shadow-inner"
               />
-              <div className="absolute right-1.5 flex items-center gap-1">
+              <div className="absolute right-1.5 flex items-center gap-1.5">
                 <button
                   type="button"
-                  onClick={() => onOpenVoiceModal()}
-                  className="p-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white transition-all shadow-md active:scale-95"
+                  onClick={() => onOpenVoiceModal(quickInput.trim())}
+                  className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-emerald-400 border border-slate-700 transition-all shadow-md active:scale-95"
                   title="Speak voice command"
                 >
                   <Mic className="w-4 h-4" />
+                </button>
+                <button
+                  type="submit"
+                  disabled={!quickInput.trim()}
+                  className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white font-semibold text-xs flex items-center gap-1 shadow-md transition-all active:scale-95"
+                  title="Send command"
+                >
+                  <span>Send</span>
+                  <Send className="w-3.5 h-3.5" />
                 </button>
               </div>
             </form>
@@ -232,36 +299,289 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         </div>
       </div>
 
-      {/* Low Stock Attention Banner (if any) */}
-      {(lowStockProducts.length > 0 || outOfStockProducts.length > 0) && (
-        <div className="p-4 rounded-2xl bg-amber-950/30 border border-amber-500/50 flex flex-col md:flex-row items-start md:items-center justify-between gap-3">
-          <div className="flex items-start gap-3">
-            <div className="p-2 rounded-xl bg-amber-500/20 text-amber-400 shrink-0">
-              <AlertTriangle className="w-5 h-5" />
-            </div>
-            <div>
-              <h3 className="text-sm font-bold text-amber-300">
-                Action Required: {lowStockProducts.length + outOfStockProducts.length} item(s) running low!
-              </h3>
-              <p className="text-xs text-slate-300 mt-0.5">
-                {[...outOfStockProducts, ...lowStockProducts]
-                  .slice(0, 3)
-                  .map((p) => `${p.name} (${p.stockQuantity} ${p.unit} left)`)
-                  .join(', ')}
-                {lowStockProducts.length + outOfStockProducts.length > 3 && ' and more...'}
-              </p>
+      {/* Notification Toast for Quick Restock & Threshold Edits */}
+      {notificationToast && (
+        <div className="p-3.5 rounded-xl bg-emerald-950/80 border border-emerald-500/50 text-emerald-200 text-xs font-semibold flex items-center justify-between shadow-lg animate-fadeIn">
+          <div className="flex items-center gap-2">
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+            <span>{notificationToast}</span>
+          </div>
+          <button
+            onClick={() => setNotificationToast(null)}
+            className="text-emerald-400 hover:text-white text-xs px-2 py-0.5"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
+      {/* DEDICATED SMART LOW-STOCK ALERT & INVENTORY MONITORING SECTION */}
+      <section className="p-5 sm:p-6 rounded-2xl bg-slate-900 border border-slate-800 shadow-md">
+        {/* Section Header */}
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 pb-4 border-b border-slate-800">
+          <div>
+            <div className="flex items-center gap-2.5">
+              <div className={`p-2 rounded-xl ${
+                restockRecommendations.length > 0
+                  ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
+                  : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+              }`}>
+                {restockRecommendations.length > 0 ? (
+                  <AlertTriangle className="w-5 h-5" />
+                ) : (
+                  <ShieldCheck className="w-5 h-5" />
+                )}
+              </div>
+              <div>
+                <h2 className="text-base sm:text-lg font-bold text-white flex items-center gap-2">
+                  Smart Low-Stock & Inventory Monitoring
+                </h2>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Real-time stock threshold tracking & AI reorder suggestions updated after every sale
+                </p>
+              </div>
             </div>
           </div>
-          <div className="flex items-center gap-2 shrink-0">
+
+          {/* Quick Filter Badges & AI Action */}
+          <div className="flex flex-wrap items-center gap-2">
             <button
-              onClick={() => onNavigate('products')}
-              className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs shadow-md transition-all"
+              onClick={() => setFilterAlertStatus('all')}
+              className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition-all ${
+                filterAlertStatus === 'all'
+                  ? 'bg-slate-700 text-white'
+                  : 'bg-slate-800/60 text-slate-400 hover:text-white'
+              }`}
             >
-              Manage & Restock
+              All Alerts ({restockRecommendations.length})
+            </button>
+            <button
+              onClick={() => setFilterAlertStatus('out')}
+              className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all ${
+                filterAlertStatus === 'out'
+                  ? 'bg-rose-500/20 text-rose-300 border border-rose-500/50'
+                  : 'bg-slate-800/60 text-rose-400/80 hover:text-rose-300'
+              }`}
+            >
+              <AlertOctagon className="w-3.5 h-3.5" />
+              Out of Stock ({outOfStockProducts.length})
+            </button>
+            <button
+              onClick={() => setFilterAlertStatus('low')}
+              className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all ${
+                filterAlertStatus === 'low'
+                  ? 'bg-amber-500/20 text-amber-300 border border-amber-500/50'
+                  : 'bg-slate-800/60 text-amber-400/80 hover:text-amber-300'
+              }`}
+            >
+              <AlertTriangle className="w-3.5 h-3.5" />
+              Low Stock ({lowStockProducts.length})
+            </button>
+            <button
+              onClick={() => onOpenVoiceModal('Show me products that need restocking', true)}
+              className="px-3.5 py-1.5 rounded-xl bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-400 border border-cyan-500/30 text-xs font-bold flex items-center gap-1.5 transition-all ml-auto"
+              title="Ask Dukaan Voice & AI Assistant for restock analysis"
+            >
+              <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
+              <span>AI Restock Plan</span>
             </button>
           </div>
         </div>
-      )}
+
+        {/* Section Content */}
+        <div className="mt-4">
+          {displayedAlerts.length === 0 ? (
+            <div className="p-6 rounded-xl bg-slate-950/60 border border-dashed border-slate-800 text-center flex flex-col items-center justify-center">
+              <div className="p-3 rounded-2xl bg-emerald-500/10 text-emerald-400 mb-3 border border-emerald-500/20">
+                <ShieldCheck className="w-8 h-8" />
+              </div>
+              <h3 className="text-sm font-bold text-emerald-400">
+                All Product Stock Levels are Healthy
+              </h3>
+              <p className="text-xs text-slate-400 max-w-md mt-1">
+                {filterAlertStatus === 'all'
+                  ? 'None of your products are currently at or below minimum stock threshold. Stock levels update instantly upon every customer sale.'
+                  : `No items matching the selected filter "${filterAlertStatus === 'out' ? 'Out of Stock' : 'Low Stock'}".`}
+              </p>
+              <button
+                onClick={() => onNavigate('products')}
+                className="mt-4 px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-2 transition-all"
+              >
+                <SlidersHorizontal className="w-3.5 h-3.5" />
+                Configure Minimum Thresholds in Products
+              </button>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3.5">
+              {displayedAlerts.map((rec) => {
+                const isOutOfStock = rec.status === 'out_of_stock';
+                const isEditingThis = editingThresholdId === rec.productId;
+                const isRestockingThis = restockingId === rec.productId;
+                const stockPercent = rec.minThreshold > 0
+                  ? Math.min(100, Math.round((rec.currentStock / rec.minThreshold) * 100))
+                  : 0;
+
+                return (
+                  <div
+                    key={rec.productId}
+                    className={`p-4 rounded-xl border transition-all flex flex-col justify-between ${
+                      isOutOfStock
+                        ? 'bg-rose-950/20 border-rose-500/40 hover:border-rose-500/60'
+                        : 'bg-amber-950/20 border-amber-500/30 hover:border-amber-500/50'
+                    }`}
+                  >
+                    <div>
+                      {/* Badge and Category */}
+                      <div className="flex items-center justify-between gap-2 mb-2">
+                        <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wide truncate">
+                          {rec.category || 'General'}
+                        </span>
+                        {isOutOfStock ? (
+                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-extrabold bg-rose-500/20 text-rose-300 border border-rose-500/40">
+                            <span className="w-1.5 h-1.5 rounded-full bg-rose-400 animate-pulse" />
+                            OUT OF STOCK
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-extrabold bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                            <AlertTriangle className="w-3 h-3 text-amber-400" />
+                            LOW STOCK
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Product Name */}
+                      <h4 className="text-sm font-bold text-white truncate" title={rec.productName}>
+                        {rec.productName}
+                      </h4>
+
+                      {/* Quantity vs Threshold */}
+                      <div className="mt-3 grid grid-cols-2 gap-2 bg-slate-950/50 p-2.5 rounded-xl border border-slate-800/80">
+                        <div>
+                          <span className="text-[10px] font-medium text-slate-400 uppercase">Available Stock</span>
+                          <div className={`text-base font-extrabold ${isOutOfStock ? 'text-rose-400' : 'text-amber-400'}`}>
+                            {rec.currentStock} <span className="text-xs font-normal text-slate-400">{rec.unit}</span>
+                          </div>
+                        </div>
+
+                        <div>
+                          <span className="text-[10px] font-medium text-slate-400 uppercase flex items-center justify-between">
+                            <span>Min Threshold</span>
+                            {!isEditingThis && (
+                              <button
+                                onClick={() => {
+                                  setEditingThresholdId(rec.productId);
+                                  setTempThresholdValue(rec.minThreshold);
+                                }}
+                                className="text-cyan-400 hover:text-cyan-300 p-0.5 rounded"
+                                title="Edit Minimum Threshold"
+                              >
+                                <Edit2 className="w-3 h-3" />
+                              </button>
+                            )}
+                          </span>
+
+                          {isEditingThis ? (
+                            <div className="flex items-center gap-1 mt-1">
+                              <input
+                                type="number"
+                                min="0"
+                                max="1000"
+                                value={tempThresholdValue}
+                                onChange={(e) => setTempThresholdValue(Math.max(0, parseInt(e.target.value) || 0))}
+                                className="w-14 px-1.5 py-0.5 rounded bg-slate-900 border border-cyan-500/60 text-xs font-bold text-white focus:outline-none"
+                              />
+                              <button
+                                onClick={() => handleSaveThreshold(rec.productId)}
+                                className="p-1 rounded bg-cyan-500 hover:bg-cyan-400 text-slate-950 text-xs"
+                                title="Save Threshold"
+                              >
+                                <Check className="w-3 h-3" />
+                              </button>
+                              <button
+                                onClick={() => setEditingThresholdId(null)}
+                                className="p-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-400 text-xs"
+                                title="Cancel"
+                              >
+                                ✕
+                              </button>
+                            </div>
+                          ) : (
+                            <div className="text-base font-extrabold text-slate-200">
+                              {rec.minThreshold} <span className="text-xs font-normal text-slate-400">{rec.unit}</span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Stock Level Progress Indicator */}
+                      <div className="mt-2.5">
+                        <div className="flex items-center justify-between text-[10px] text-slate-400 mb-1">
+                          <span>Threshold Deficit</span>
+                          <span>{stockPercent}% of safe level</span>
+                        </div>
+                        <div className="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                          <div
+                            className={`h-full rounded-full transition-all ${
+                              isOutOfStock ? 'bg-rose-500 w-1' : 'bg-amber-400'
+                            }`}
+                            style={{ width: `${Math.max(4, Math.min(100, stockPercent))}%` }}
+                          />
+                        </div>
+                      </div>
+
+                      {/* Smart Reorder Suggestion */}
+                      <div className="mt-3 p-2.5 rounded-xl bg-slate-950/70 border border-slate-800/90">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[11px] font-semibold text-slate-300">Suggested Reorder:</span>
+                          <span className="text-xs font-extrabold text-emerald-400">
+                            +{rec.suggestedReorderQuantity} {rec.unit}
+                          </span>
+                        </div>
+                        <p className="text-[10px] text-slate-400 mt-1 leading-relaxed">
+                          💡 {rec.salesVelocityReason}
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* 1-Click Fast Restock Button */}
+                    <div className="mt-4 pt-3 border-t border-slate-800/60 flex items-center gap-2">
+                      <button
+                        onClick={() => handleQuickRestock(rec.productId, rec.suggestedReorderQuantity, rec.productName)}
+                        disabled={isRestockingThis}
+                        className={`flex-1 py-2 px-3 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 shadow-sm transition-all ${
+                          isOutOfStock
+                            ? 'bg-rose-500 hover:bg-rose-400 text-white'
+                            : 'bg-emerald-500 hover:bg-emerald-400 text-slate-950'
+                        } disabled:opacity-50`}
+                      >
+                        {isRestockingThis ? (
+                          <>
+                            <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                            <span>Updating...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Plus className="w-3.5 h-3.5" />
+                            <span>Restock +{rec.suggestedReorderQuantity} {rec.unit}</span>
+                          </>
+                        )}
+                      </button>
+
+                      <button
+                        onClick={() => onNavigate('products')}
+                        className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition-all text-xs"
+                        title="Edit Full Product Details"
+                      >
+                        <Edit2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </section>
 
       {/* Fast Action Grid */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">

@@ -17,6 +17,7 @@ const MainAppContent: React.FC = () => {
   const [activeTab, setActiveTab] = useState<string>('dashboard');
   const [isVoiceModalOpen, setIsVoiceModalOpen] = useState(false);
   const [voiceInitialQuery, setVoiceInitialQuery] = useState('');
+  const [voiceAutoExecute, setVoiceAutoExecute] = useState(false);
   const [isAddProductModalOpen, setIsAddProductModalOpen] = useState(false);
   const [selectedSaleForReceipt, setSelectedSaleForReceipt] = useState<Sale | null>(null);
 
@@ -54,8 +55,9 @@ const MainAppContent: React.FC = () => {
     return <LoginView />;
   }
 
-  const handleOpenVoiceModal = (initialPrompt?: string) => {
+  const handleOpenVoiceModal = (initialPrompt?: string, autoExecute: boolean = false) => {
     setVoiceInitialQuery(initialPrompt || '');
+    setVoiceAutoExecute(autoExecute);
     setIsVoiceModalOpen(true);
   };
 
@@ -125,6 +127,7 @@ const MainAppContent: React.FC = () => {
         isOpen={isVoiceModalOpen}
         onClose={() => setIsVoiceModalOpen(false)}
         initialQuery={voiceInitialQuery}
+        autoExecute={voiceAutoExecute}
       />
 
       {/* Invoice Receipt Modal */}
