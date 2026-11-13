@@ -22,8 +22,9 @@ import {
   OperationType,
   User,
 } from '../firebase/config';
-import { Product, Sale, SaleItem, UserProfile, AICommandResponse, PaymentMode, RestockRecommendation } from '../types';
+import { Product, Sale, SaleItem, UserProfile, AICommandResponse, PaymentMode, RestockRecommendation, AssistantLanguage } from '../types';
 import { INITIAL_PRODUCTS, INITIAL_DEMO_PRODUCTS, INITIAL_DEMO_SALES } from '../data/seedData';
+import { computePeriodSummaries } from '../utils/analytics';
 
 interface DukanContextType {
   user: User | { uid: string; displayName: string; email?: string; isAnonymous?: boolean } | null;
@@ -58,9 +59,13 @@ interface DukanContextType {
     notes?: string;
   }) => Promise<Sale>;
   processAICommand: (commandText: string) => Promise<AICommandResponse>;
+  interpretAICommand: (commandText: string, lang?: AssistantLanguage) => Promise<AICommandResponse>;
+  executeAICommandResult: (result: AICommandResponse) => Promise<{ executed: boolean; summary?: string }>;
+  assistantLanguage: AssistantLanguage;
+  setAssistantLanguage: (lang: AssistantLanguage) => void;
   speechEnabled: boolean;
   setSpeechEnabled: (enabled: boolean) => void;
-  speakText: (text: string) => void;
+  speakText: (text: string, lang?: AssistantLanguage) => void;
   seedInitialData: () => Promise<void>;
   resetToDemoData: () => void;
 }
@@ -94,6 +99,24 @@ export const DukanProvider: React.FC<{ children: ReactNode }> = ({ children }) =
   const [products, setProducts] = useState<Product[]>([]);
   const [sales, setSales] = useState<Sale[]>([]);
   const [speechEnabled, setSpeechEnabled] = useState<boolean>(true);
+  const [assistantLanguage, setAssistantLanguageState] = useState<AssistantLanguage>(() => {
+    try {
+      const saved = localStorage.getItem('dukan_assistant_lang');
+      if (saved === 'kn' || saved === 'hi' || saved === 'en') return saved;
+    } catch {
+      // ignore
+    }
+    return 'en';
+  });
+
+  const setAssistantLanguage = (lang: AssistantLanguage) => {
+    setAssistantLanguageState(lang);
+    try {
+      localStorage.setItem('dukan_assistant_lang', lang);
+    } catch {
+      // ignore
+    }
+  };
 
   // Helper to sync local demo data to localStorage
   const saveDemoState = (newProducts: Product[], newSales: Sale[]) => {
@@ -105,15 +128,31 @@ export const DukanProvider: React.FC<{ children: ReactNode }> = ({ children }) =
     }
   };
 
-  // Text-To-Speech helper
-  const speakText = (text: string) => {
-    if (!speechEnabled || typeof window === 'undefined' || !('speechSynthesis' in window)) return;
+  // Multilingual Text-To-Speech helper (kn-IN, hi-IN, en-IN)
+  const speakText = (text: string, langOverride?: AssistantLanguage) => {
+    if (!speechEnabled || typeof window === 'undefined' || !('speechSynthesis' in window) || !text?.trim()) return;
     try {
       window.speechSynthesis.cancel();
+      const targetLang = langOverride || assistantLanguage;
+      const localeMap: Record<AssistantLanguage, string> = {
+        kn: 'kn-IN',
+        hi: 'hi-IN',
+        en: 'en-IN',
+      };
+      const locale = localeMap[targetLang] || 'en-IN';
       const utterance = new SpeechSynthesisUtterance(text);
-      utterance.rate = 1.05;
+      utterance.rate = 1.0;
       utterance.pitch = 1.0;
-      utterance.lang = 'en-IN';
+      utterance.lang = locale;
+
+      const voices = window.speechSynthesis.getVoices ? window.speechSynthesis.getVoices() : [];
+      if (voices.length > 0) {
+        const exactVoice = voices.find((v) => v.lang.toLowerCase() === locale.toLowerCase());
+        const prefixVoice = voices.find((v) => v.lang.toLowerCase().startsWith(targetLang));
+        if (exactVoice) utterance.voice = exactVoice;
+        else if (prefixVoice) utterance.voice = prefixVoice;
+      }
+
       window.speechSynthesis.speak(utterance);
     } catch (e) {
       console.warn('Speech synthesis failed:', e);
@@ -750,9 +789,13 @@ export const DukanProvider: React.FC<{ children: ReactNode }> = ({ children }) =
     }
   };
 
-  // Process Natural Language & Voice Shopkeeper Command
-  const processAICommand = async (commandText: string): Promise<AICommandResponse> => {
+  // Interpret Natural Language & Multilingual Command via Gemini (without immediate mutation)
+  const interpretAICommand = async (
+    commandText: string,
+    lang?: AssistantLanguage
+  ): Promise<AICommandResponse> => {
     if (!commandText.trim()) throw new Error('Command text is empty');
+    const selectedLang = lang || assistantLanguage;
 
     const inventoryContext = products.map((p) => ({
       id: p.id,
@@ -761,15 +804,28 @@ export const DukanProvider: React.FC<{ children: ReactNode }> = ({ children }) =
       sellingPrice: p.sellingPrice,
       costPrice: p.costPrice,
       stockQuantity: p.stockQuantity,
+      minStockThreshold: p.minStockThreshold,
       unit: p.unit,
     }));
+
+    const periods = computePeriodSummaries(sales, products);
+    const salesContext = {
+      todayRevenue: periods.today.revenue,
+      todayGrossProfit: periods.today.grossProfit,
+      todayBillsCount: periods.today.billsCount,
+      todayItemsCount: periods.today.itemsCount,
+      weekRevenue: periods.week.revenue,
+      monthRevenue: periods.month.revenue,
+    };
 
     const response = await fetch('/api/gemini/command', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         command: commandText,
+        language: selectedLang,
         inventoryContext,
+        salesContext,
         shopContext: {
           shopName: profile?.shopName || 'My Dukan',
           currency: profile?.currency || '₹',
@@ -783,9 +839,19 @@ export const DukanProvider: React.FC<{ children: ReactNode }> = ({ children }) =
     }
 
     const json = await response.json();
-    const result: AICommandResponse = json.data;
+    const result: AICommandResponse = {
+      ...json.data,
+      language: json.data?.language || selectedLang,
+    };
+    return result;
+  };
 
-    // Execute recognized actions automatically
+  // Execute a confirmed AI Command result (Sale, Add Product, Update Product, Delete Product)
+  const executeAICommandResult = async (
+    result: AICommandResponse
+  ): Promise<{ executed: boolean; summary?: string }> => {
+    const lang = result.language || assistantLanguage;
+
     if (result.intent === 'RECORD_SALE' && result.saleData?.items?.length) {
       const itemsToRecord: { productId: string; quantity: number; unitPrice?: number }[] = [];
 
@@ -803,26 +869,40 @@ export const DukanProvider: React.FC<{ children: ReactNode }> = ({ children }) =
         if (matched) {
           itemsToRecord.push({
             productId: matched.id,
-            quantity: item.quantity,
+            quantity: Number(item.quantity) || 1,
             unitPrice: item.unitPrice || matched.sellingPrice,
           });
         }
       }
 
-      if (itemsToRecord.length > 0) {
-        await recordSale({
-          customerName: result.saleData.customerName,
-          customerPhone: result.saleData.customerPhone,
-          items: itemsToRecord,
-          paymentMode: result.saleData.paymentMode || 'cash',
-          paymentStatus: result.saleData.paymentStatus,
-          notes: result.saleData.notes,
-        });
+      if (itemsToRecord.length === 0) {
+        throw new Error('Could not find matching inventory items to record this sale.');
       }
+
+      const recorded = await recordSale({
+        customerName: result.saleData.customerName,
+        customerPhone: result.saleData.customerPhone,
+        items: itemsToRecord,
+        paymentMode: result.saleData.paymentMode || 'cash',
+        paymentStatus: result.saleData.paymentStatus,
+        notes: result.saleData.notes,
+      });
+
+      const confirmSpeech =
+        lang === 'kn'
+          ? `ಮಾರಾಟ ಯಶಸ್ವಿಯಾಗಿ ದಾಖಲಾಗಿದೆ. ಬಿಲ್ ಮೊತ್ತ ₹${recorded.totalAmount}.`
+          : lang === 'hi'
+          ? `बिक्री सफलतापूर्वक दर्ज हो गई है। बिल राशि ₹${recorded.totalAmount}।`
+          : `Sale recorded successfully! Bill ${recorded.billNumber} for ₹${recorded.totalAmount}.`;
+      speakText(confirmSpeech, lang);
+
+      return { executed: true, summary: confirmSpeech };
     } else if (result.intent === 'ADD_PRODUCT' && result.productData) {
       const prodName = (result.productData.name || 'New Item').trim();
       const lowerName = prodName.toLowerCase();
-      const existing = products.find((p) => p.name.toLowerCase() === lowerName);
+      const existing = products.find(
+        (p) => p.name.toLowerCase() === lowerName || p.name.toLowerCase().includes(lowerName)
+      );
       if (existing) {
         const addedQty = Number(result.productData.stockQuantity) || 1;
         await updateProduct(existing.id, {
@@ -833,7 +913,9 @@ export const DukanProvider: React.FC<{ children: ReactNode }> = ({ children }) =
         await addProduct({
           name: prodName,
           category: result.productData.category || 'General',
-          costPrice: Number(result.productData.costPrice) || Math.max(1, Math.round((Number(result.productData.sellingPrice) || 30) * 0.8)),
+          costPrice:
+            Number(result.productData.costPrice) ||
+            Math.max(1, Math.round((Number(result.productData.sellingPrice) || 30) * 0.8)),
           sellingPrice: Number(result.productData.sellingPrice) || 30,
           stockQuantity: Number(result.productData.stockQuantity) || 1,
           minStockThreshold: Number(result.productData.minStockThreshold) || 2,
@@ -841,42 +923,82 @@ export const DukanProvider: React.FC<{ children: ReactNode }> = ({ children }) =
           barcode: result.productData.barcode || '',
         });
       }
+
+      const confirmSpeech =
+        lang === 'kn'
+          ? `${prodName} ಸ್ಟಾಕ್ಗೆ ಯಶಸ್ವಿಯಾಗಿ ಸೇರಿಸಲಾಗಿದೆ.`
+          : lang === 'hi'
+          ? `${prodName} सफलतापूर्वक स्टॉक में जोड़ दिया गया है।`
+          : `${prodName} added to inventory successfully!`;
+      speakText(confirmSpeech, lang);
+
+      return { executed: true, summary: confirmSpeech };
     } else if (result.intent === 'UPDATE_PRODUCT' && result.updateData) {
       let targetProd = products.find((p) => p.id === result.updateData?.matchedProductId);
       if (!targetProd && result.updateData.productName) {
         const lowerName = result.updateData.productName.toLowerCase();
         targetProd = products.find((p) => p.name.toLowerCase().includes(lowerName));
       }
-      if (targetProd) {
-        const updates: any = {};
-        if (result.updateData.newSellingPrice !== undefined) updates.sellingPrice = result.updateData.newSellingPrice;
-        if (result.updateData.newCostPrice !== undefined) updates.costPrice = result.updateData.newCostPrice;
-        if (result.updateData.stockQuantity !== undefined) {
-          if (result.updateData.stockAdjustmentType === 'add') {
-            updates.stockQuantity = targetProd.stockQuantity + result.updateData.stockQuantity;
-          } else if (result.updateData.stockAdjustmentType === 'subtract') {
-            updates.stockQuantity = Math.max(0, targetProd.stockQuantity - result.updateData.stockQuantity);
-          } else {
-            updates.stockQuantity = result.updateData.stockQuantity;
-          }
-        }
-        await updateProduct(targetProd.id, updates);
+      if (!targetProd) {
+        throw new Error('Could not find target product to update.');
       }
+      const updates: any = {};
+      if (result.updateData.newSellingPrice !== undefined) updates.sellingPrice = result.updateData.newSellingPrice;
+      if (result.updateData.newCostPrice !== undefined) updates.costPrice = result.updateData.newCostPrice;
+      if (result.updateData.stockQuantity !== undefined) {
+        if (result.updateData.stockAdjustmentType === 'add') {
+          updates.stockQuantity = targetProd.stockQuantity + result.updateData.stockQuantity;
+        } else if (result.updateData.stockAdjustmentType === 'subtract') {
+          updates.stockQuantity = Math.max(0, targetProd.stockQuantity - result.updateData.stockQuantity);
+        } else {
+          updates.stockQuantity = result.updateData.stockQuantity;
+        }
+      }
+      await updateProduct(targetProd.id, updates);
+      const confirmSpeech =
+        lang === 'kn'
+          ? `${targetProd.name} ಮಾಹಿತಿ ನವೀಕರಿಸಲಾಗಿದೆ.`
+          : lang === 'hi'
+          ? `${targetProd.name} की जानकारी अपडेट हो गई है।`
+          : `Updated ${targetProd.name} successfully!`;
+      speakText(confirmSpeech, lang);
+      return { executed: true, summary: confirmSpeech };
     } else if (result.intent === 'DELETE_PRODUCT' && result.deleteData) {
       let targetProd = products.find((p) => p.id === result.deleteData?.matchedProductId);
       if (!targetProd && result.deleteData.productName) {
         const lowerName = result.deleteData.productName.toLowerCase();
         targetProd = products.find((p) => p.name.toLowerCase().includes(lowerName));
       }
-      if (targetProd) {
-        await deleteProduct(targetProd.id);
+      if (!targetProd) {
+        throw new Error('Could not find target product to delete.');
       }
+      await deleteProduct(targetProd.id);
+      const confirmSpeech =
+        lang === 'kn'
+          ? `${targetProd.name} ಸ್ಟಾಕ್‌ನಿಂದ ತೆಗೆದುಹಾಕಲಾಗಿದೆ.`
+          : lang === 'hi'
+          ? `${targetProd.name} को स्टॉक से हटा दिया गया है।`
+          : `Removed ${targetProd.name} from inventory.`;
+      speakText(confirmSpeech, lang);
+      return { executed: true, summary: confirmSpeech };
     }
 
-    if (result.speechResponse) {
-      speakText(result.speechResponse);
-    }
+    return { executed: false };
+  };
 
+  // Legacy unified call (interprets and immediately executes)
+  const processAICommand = async (commandText: string): Promise<AICommandResponse> => {
+    const result = await interpretAICommand(commandText, assistantLanguage);
+    if (
+      result.intent === 'RECORD_SALE' ||
+      result.intent === 'ADD_PRODUCT' ||
+      result.intent === 'UPDATE_PRODUCT' ||
+      result.intent === 'DELETE_PRODUCT'
+    ) {
+      await executeAICommandResult(result);
+    } else if (result.speechResponse) {
+      speakText(result.speechResponse, result.language || assistantLanguage);
+    }
     return result;
   };
 
@@ -907,6 +1029,10 @@ export const DukanProvider: React.FC<{ children: ReactNode }> = ({ children }) =
         quickAdjustStock,
         recordSale,
         processAICommand,
+        interpretAICommand,
+        executeAICommandResult,
+        assistantLanguage,
+        setAssistantLanguage,
         speechEnabled,
         setSpeechEnabled,
         speakText,

@@ -308,9 +308,166 @@ async function runTests() {
   itemLow.stockQuantity += restockAmount;
   assert(itemLow.stockQuantity > itemLow.minStockThreshold, `Restocking +${restockAmount} kg brings stock to ${itemLow.stockQuantity} kg, safely clearing LOW STOCK alert`);
 
+  // 7. BUSINESS INSIGHTS & PROFIT ANALYTICS MODULE TESTS
+  const {
+    filterSalesByCriteria,
+    computeSalesAnalytics,
+    computePeriodSummaries,
+  } = await import('./src/utils/analytics');
+
+  const analyticsProducts = [
+    { id: 'p1', userId: 's1', name: 'Basmati Rice', category: 'Staples', costPrice: 80, sellingPrice: 100, stockQuantity: 20, minStockThreshold: 5, unit: 'kg', createdAt: '', updatedAt: '' },
+    { id: 'p2', userId: 's1', name: 'Tata Salt', category: 'Staples', costPrice: 20, sellingPrice: 28, stockQuantity: 30, minStockThreshold: 10, unit: 'pkt', createdAt: '', updatedAt: '' },
+    { id: 'p3', userId: 's1', name: 'Amul Milk', category: 'Dairy', costPrice: 25, sellingPrice: 28, stockQuantity: 3, minStockThreshold: 8, unit: 'pkt', createdAt: '', updatedAt: '' },
+    { id: 'p4', userId: 's1', name: 'Luxury Olive Oil', category: 'Oils', costPrice: 400, sellingPrice: 500, stockQuantity: 5, minStockThreshold: 2, unit: 'bottle', createdAt: '', updatedAt: '' },
+  ];
+
+  const now = new Date();
+  const todayIso = now.toISOString();
+  const threeDaysAgoIso = new Date(now.getTime() - 3 * 86400000).toISOString();
+
+  const analyticsSales = [
+    {
+      id: 'sale-1',
+      userId: 's1',
+      billNumber: 'INV-101',
+      customerName: 'Asha',
+      items: [
+        { productId: 'p1', productName: 'Basmati Rice', quantity: 2, unit: 'kg', unitPrice: 100, costPrice: 80, totalPrice: 200 },
+        { productId: 'p2', productName: 'Tata Salt', quantity: 5, unit: 'pkt', unitPrice: 28, costPrice: 20, totalPrice: 140 },
+      ],
+      subtotal: 340,
+      discount: 10,
+      totalAmount: 330,
+      totalProfit: 70, // 330 - (2*80 + 5*20 = 260) = 70
+      paymentMode: 'cash' as const,
+      paymentStatus: 'paid' as const,
+      createdAt: todayIso,
+    },
+    {
+      id: 'sale-2',
+      userId: 's1',
+      billNumber: 'INV-102',
+      customerName: 'Vikram',
+      items: [
+        { productId: 'p3', productName: 'Amul Milk', quantity: 4, unit: 'pkt', unitPrice: 28, costPrice: 25, totalPrice: 112 },
+      ],
+      subtotal: 112,
+      discount: 0,
+      totalAmount: 112,
+      totalProfit: 12,
+      paymentMode: 'upi' as const,
+      paymentStatus: 'paid' as const,
+      createdAt: threeDaysAgoIso,
+    },
+  ];
+
+  const periods = computePeriodSummaries(analyticsSales, analyticsProducts, now);
+  assert(periods.today.revenue === 330, `Daily revenue matches actual today sales (₹330, got ₹${periods.today.revenue})`);
+  assert(periods.today.cogs === 260, `Daily COGS computed from actual product costs (₹260, got ₹${periods.today.cogs})`);
+  assert(periods.today.grossProfit === 70, `Daily Gross Profit = Revenue - COGS (₹70, got ₹${periods.today.grossProfit})`);
+  assert(periods.week.revenue === 442, `Weekly revenue aggregates today + 3 days ago (₹442, got ₹${periods.week.revenue})`);
+  assert(periods.month.billsCount === 2, 'Monthly summary captures both bills');
+
+  // Verify Net Profit is strictly NULL when operating expenses are NOT provided
+  const weekSalesFiltered = filterSalesByCriteria(analyticsSales, { dateRange: 'week', now });
+  const statsNoOpEx = computeSalesAnalytics(weekSalesFiltered, analyticsProducts, { allSalesForVelocity: analyticsSales });
+  assert(statsNoOpEx.netProfit === null, 'Does NOT calculate Net Profit when operating expenses are unavailable');
+  assert(statsNoOpEx.grossProfit === (442 - 360), `Gross Profit strictly equals ₹82 (got ₹${statsNoOpEx.grossProfit})`);
+
+  // Verify Net Profit IS calculated only when operating expenses ARE provided
+  const statsWithOpEx = computeSalesAnalytics(weekSalesFiltered, analyticsProducts, {
+    allSalesForVelocity: analyticsSales,
+    operatingExpenses: 32,
+  });
+  assert(statsWithOpEx.netProfit === 50, `Net Profit equals Gross Profit (₹82) - Operating Expenses (₹32) = ₹50`);
+
+  // Top 5 & Slow-moving verification
+  assert(statsNoOpEx.topSelling[0].name === 'Tata Salt' && statsNoOpEx.topSelling[0].qtySold === 5, 'Top seller correctly identifies Tata Salt (5 sold)');
+  assert(statsNoOpEx.slowMoving.some(s => s.name === 'Luxury Olive Oil' && s.qtySold === 0 && s.stockValue === 2000), 'Slow-moving tracker identifies Luxury Olive Oil (0 sold, ₹2000 capital locked)');
+
+  // Incomplete cost handling safety
+  const incompleteSales = [
+    {
+      id: 'sale-missing-cost',
+      userId: 's1',
+      billNumber: 'INV-999',
+      items: [{ productId: 'unknown-item', productName: 'Adhoc Item', quantity: 2, unit: 'pcs', unitPrice: 50, costPrice: undefined as any, totalPrice: 100 }],
+      subtotal: 100,
+      discount: 0,
+      totalAmount: 100,
+      totalProfit: 0,
+      paymentMode: 'cash' as const,
+      paymentStatus: 'paid' as const,
+      createdAt: todayIso,
+    },
+  ];
+  const incompleteStats = computeSalesAnalytics(incompleteSales, analyticsProducts);
+  assert(incompleteStats.incompleteCostItemsCount === 1, 'Flags incomplete cost item safely without crashing or fabricating cost');
+
+  // 8. MULTILINGUAL VOICE & TEXT ASSISTANT TESTS (Kannada, Hindi, English)
+  const { parseCommandMultilingual } = await import('./src/utils/multilingualParser');
+
+  const testInv = [
+    { id: '1', name: 'India Gate Basmati Rice (1 kg)', category: 'Staples & Grains', costPrice: 85, sellingPrice: 105, stockQuantity: 2, minStockThreshold: 6, unit: 'kg' },
+    { id: '2', name: 'Tata Salt (1 kg)', category: 'Staples & Grains', costPrice: 22, sellingPrice: 28, stockQuantity: 30, minStockThreshold: 10, unit: 'pkt' },
+    { id: '3', name: 'Amul Taaza Milk (500 ml)', category: 'Dairy', costPrice: 25, sellingPrice: 28, stockQuantity: 18, minStockThreshold: 8, unit: 'pkt' },
+  ];
+  const testSalesCtx = { todayRevenue: 330, todayGrossProfit: 70, todayBillsCount: 1, todayItemsCount: 7 };
+
+  // Kannada Tests
+  const knAdd = parseCommandMultilingual('ಎರಡು ಕೆಜಿ ಅಕ್ಕಿ ಸ್ಟಾಕ್ಗೆ ಸೇರಿಸು', testInv, 'My Dukan', '₹', 'kn', testSalesCtx);
+  assert(knAdd.intent === 'ADD_PRODUCT' && knAdd.productData?.stockQuantity === 2 && knAdd.productData?.unit === 'kg', 'Kannada Add Product parsed correctly (2 kg Rice)');
+
+  const knSale = parseCommandMultilingual('ಎರಡು ಪ್ಯಾಕೆಟ್ ಉಪ್ಪು ಮಾರಾಟ ಆಯಿತು', testInv, 'My Dukan', '₹', 'kn', testSalesCtx);
+  assert(knSale.intent === 'RECORD_SALE' && knSale.saleData?.items?.[0]?.matchedProductId === '2' && knSale.saleData?.items?.[0]?.quantity === 2, 'Kannada Record Sale parsed correctly (2 pkt Salt)');
+
+  const knSalesQuery = parseCommandMultilingual('ಇವತ್ತು ಎಷ್ಟು ಸೇಲ್ ಆಗಿದೆ?', testInv, 'My Dukan', '₹', 'kn', testSalesCtx);
+  assert(knSalesQuery.intent === 'QUERY_INFO' && knSalesQuery.speechResponse.includes('330'), 'Kannada Daily Sales query returns real today revenue (₹330) in Kannada');
+
+  const knLowQuery = parseCommandMultilingual('ಯಾವ ವಸ್ತುಗಳ ಸ್ಟಾಕ್ ಕಡಿಮೆ ಇದೆ?', testInv, 'My Dukan', '₹', 'kn', testSalesCtx);
+  assert(knLowQuery.intent === 'QUERY_INFO' && (knLowQuery.queryAnswer || '').includes('Basmati Rice'), 'Kannada Low Stock query identifies Basmati Rice');
+
+  // Hindi Tests
+  const hiAdd = parseCommandMultilingual('दो किलो चावल स्टॉक में जोड़ो', testInv, 'My Dukan', '₹', 'hi', testSalesCtx);
+  assert(hiAdd.intent === 'ADD_PRODUCT' && hiAdd.productData?.stockQuantity === 2 && hiAdd.productData?.unit === 'kg', 'Hindi Add Product parsed correctly (2 kg Rice)');
+
+  const hiSale = parseCommandMultilingual('दो पैकेट नमक बेच दिया', testInv, 'My Dukan', '₹', 'hi', testSalesCtx);
+  assert(hiSale.intent === 'RECORD_SALE' && hiSale.saleData?.items?.[0]?.matchedProductId === '2' && hiSale.saleData?.items?.[0]?.quantity === 2, 'Hindi Record Sale parsed correctly (2 pkt Salt)');
+
+  const hiSalesQuery = parseCommandMultilingual('आज कितनी बिक्री हुई?', testInv, 'My Dukan', '₹', 'hi', testSalesCtx);
+  assert(hiSalesQuery.intent === 'QUERY_INFO' && hiSalesQuery.speechResponse.includes('330'), 'Hindi Daily Sales query returns real today revenue (₹330) in Hindi');
+
+  const hiLowQuery = parseCommandMultilingual('कौन से सामान का स्टॉक कम है?', testInv, 'My Dukan', '₹', 'hi', testSalesCtx);
+  assert(hiLowQuery.intent === 'QUERY_INFO' && (hiLowQuery.queryAnswer || '').includes('Basmati Rice'), 'Hindi Low Stock query identifies Basmati Rice');
+
+  // English Tests
+  const enAdd = parseCommandMultilingual('Add 2 kg rice to inventory', testInv, 'My Dukan', '₹', 'en', testSalesCtx);
+  assert(enAdd.intent === 'ADD_PRODUCT' && enAdd.productData?.stockQuantity === 2 && enAdd.productData?.unit === 'kg', 'English Add Product parsed correctly (2 kg Rice)');
+
+  const enSale = parseCommandMultilingual('Sold 2 packets of salt', testInv, 'My Dukan', '₹', 'en', testSalesCtx);
+  assert(enSale.intent === 'RECORD_SALE' && enSale.saleData?.items?.[0]?.matchedProductId === '2' && enSale.saleData?.items?.[0]?.quantity === 2, 'English Record Sale parsed correctly (2 pkt Salt)');
+
+  const enSalesQuery = parseCommandMultilingual("Show today's sales", testInv, 'My Dukan', '₹', 'en', testSalesCtx);
+  assert(enSalesQuery.intent === 'QUERY_INFO' && enSalesQuery.speechResponse.includes('330'), 'English Daily Sales query returns real today revenue (₹330)');
+
+  const enLowQuery = parseCommandMultilingual('Which products are low in stock?', testInv, 'My Dukan', '₹', 'en', testSalesCtx);
+  assert(enLowQuery.intent === 'QUERY_INFO' && (enLowQuery.queryAnswer || '').includes('Basmati Rice'), 'English Low Stock query identifies Basmati Rice');
+
+  // Stock check, Price check & Ambiguous Sale Safety
+  const knPrice = parseCommandMultilingual('ಹಾಲಿನ ಬೆಲೆ ಎಷ್ಟು?', testInv, 'My Dukan', '₹', 'kn', testSalesCtx);
+  assert(knPrice.intent === 'QUERY_INFO' && knPrice.speechResponse.includes('28'), 'Kannada price check returns ₹28 for Milk');
+
+  const hiStock = parseCommandMultilingual('चावल का कितना स्टॉक बचा है?', testInv, 'My Dukan', '₹', 'hi', testSalesCtx);
+  assert(hiStock.intent === 'QUERY_INFO' && hiStock.speechResponse.includes('2 kg'), 'Hindi available stock check returns 2 kg for Rice');
+
+  const ambigSale = parseCommandMultilingual('Sold 5 mystery items', testInv, 'My Dukan', '₹', 'en', testSalesCtx);
+  assert(ambigSale.isAmbiguous === true, 'Flags ambiguous/unmatched sale for mandatory confirmation');
+
   console.log(`\nTEST SUMMARY: ${passed} PASSED, ${failed} FAILED`);
   if (failed > 0) process.exit(1);
 }
 
 runTests().catch(console.error);
+
 

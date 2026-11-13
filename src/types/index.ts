@@ -67,6 +67,8 @@ export interface Sale {
   createdAt: string;
 }
 
+export type AssistantLanguage = 'kn' | 'hi' | 'en';
+
 export interface AICommandItem {
   matchedProductId?: string;
   productName: string;
@@ -78,6 +80,10 @@ export interface AICommandItem {
 export interface AICommandResponse {
   intent: 'RECORD_SALE' | 'ADD_PRODUCT' | 'UPDATE_PRODUCT' | 'DELETE_PRODUCT' | 'QUERY_INFO' | 'CONVERSATIONAL';
   confidence?: number;
+  language?: AssistantLanguage;
+  interpretedCommand?: string;
+  isAmbiguous?: boolean;
+  ambiguityReason?: string;
   speechResponse: string;
   saleData?: {
     customerName?: string;
@@ -112,6 +118,16 @@ export interface AICommandResponse {
   queryAnswer?: string;
 }
 
+export interface BusinessInsightsResponse {
+  executiveSummary: string;
+  keyHighlights: string[];
+  stockManagementSuggestions: string[];
+  profitabilitySuggestions: string[];
+  warnings?: string[];
+  generatedAt: string;
+  mode?: string;
+}
+
 export interface SalesReportSummary {
   todayRevenue: number;
   todayProfit: number;
@@ -128,3 +144,4 @@ export interface SalesReportSummary {
   topSellingProducts: { name: string; quantity: number; revenue: number }[];
   paymentModeBreakdown: { mode: string; count: number; total: number }[];
 }
+
